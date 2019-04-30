@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Net;
+using System.Threading;
 
 namespace InteractiveClient
 {
@@ -6,7 +8,8 @@ namespace InteractiveClient
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("Hello World!");
+            var console = new InteractiveConsole();
+            console.Start();
         }
     }
 }
