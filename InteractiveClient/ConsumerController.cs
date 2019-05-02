@@ -32,13 +32,20 @@ namespace InteractiveClient
                 return;
             }
 
+            var consumersStarted = 0;
             for (int i=0; i<count; i++)
             {
                 var client = ConnectAndLinkClient();
-                var thread = new Thread(new ThreadStart(() => ExecuteConsumer(client)));
-                _threads.Add(client.LocalId, thread);
-                thread.Start();
+                if (client != null)
+                {
+                    consumersStarted++;
+                    var thread = new Thread(new ThreadStart(() => ExecuteConsumer(client)));
+                    _threads.Add(client.LocalId, thread);
+                    thread.Start();
+                }
             }
+
+            Console.WriteLine($"{consumersStarted} CONSUMERS STARTED | {LinkedClients.Count} CONSUMERS RUNNING");
         }
 
         private Client ConnectAndLinkClient()
@@ -165,6 +172,8 @@ namespace InteractiveClient
                     _threads.Remove(consumer.LocalId);
                 }
             }
+
+            Console.WriteLine($"{count} CONSUMERS STOPPED | {LinkedClients.Count} CONSUMERS RUNNING");
         }
 
         public void StopAllConsumers()
