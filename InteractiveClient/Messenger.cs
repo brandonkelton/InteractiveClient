@@ -20,7 +20,7 @@ namespace InteractiveClient
 
         public bool IsError { get; set; }
 
-        public void Clear()
+        public void ClearMessage()
         {
             Message.Clear();
             IsError = false;

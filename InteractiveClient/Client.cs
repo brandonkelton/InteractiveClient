@@ -11,9 +11,17 @@ namespace InteractiveClient
 {
     public class Client
     {
+        public Guid LocalId { get; private set; }
         public bool IsActive { get; private set; }
         public IPEndPoint Endpoint { get; private set; }
         public Socket Socket { get; private set; }
+
+        public long StopRequested = 0;
+
+        public Client()
+        {
+            LocalId = Guid.NewGuid();
+        }
 
         public void Connect(string hostNameOrIpAddress, int port, Messenger messenger)
         {
@@ -129,19 +137,19 @@ namespace InteractiveClient
             }
         }
 
-        public void Kill(Messenger messenger)
+        public void Kill()
         {
             if (IsActive)
             {
                 try
                 {
+                    var messenger = new Messenger();
                     Send("disconnect", messenger);
                     Socket.Close();
                 }
                 catch (Exception e)
                 {
-                    messenger.Message.Append(e.ToString());
-                    messenger.IsError = true;
+                    // Swallow error
                 }
             }
             

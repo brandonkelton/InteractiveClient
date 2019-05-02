@@ -11,6 +11,8 @@ namespace InteractiveClient
     {
         public bool IsActive { get; private set; } = true;
         private Client _client = new Client();
+        private ConsumerController _consumerController = null;
+        private long _repeatWaitStopRequested = 0;
 
         public void Start()
         {
@@ -55,7 +57,7 @@ namespace InteractiveClient
 
                     if (messenger.IsError) return;
 
-                    messenger.Clear();
+                    messenger.ClearMessage();
                     _client.Receive(messenger);
                     if (messenger.HasMessage) ShowMessage(messenger);
 
@@ -80,6 +82,30 @@ namespace InteractiveClient
                     break;
                 case CommandTypes.REPEAT:
                     RepeatCommand(command);
+                    break;
+                case CommandTypes.REPEAT_WAIT:
+                    RepeatWait(command);
+                    break;
+                case CommandTypes.START_CONSUMERS:
+                    StartConsumers(command);
+                    break;
+                case CommandTypes.STOP_CONSUMERS:
+                    StopConsumers(command);
+                    break;
+                case CommandTypes.STOP_ALL_CONSUMERS:
+                    StopAllConsumers();
+                    break;
+                case CommandTypes.LIST_WORDS:
+                    ListWords();
+                    break;
+                case CommandTypes.SAVE_WORDS:
+                    SaveWords();
+                    break;
+                case CommandTypes.CONSUMER_STATUS:
+                    ShowConsumerStatus();
+                    break;
+                case CommandTypes.CLEAR:
+                    Console.Clear();
                     break;
                 case CommandTypes.EXIT:
                     Disconnect();
@@ -115,9 +141,7 @@ namespace InteractiveClient
             if (_client != null && _client.IsActive)
             {
                 Console.WriteLine("\nDISCONNECTING...\n");
-                var messenger = new Messenger();
-                _client.Kill(messenger);
-                if (messenger.HasMessage) ShowMessage(messenger);
+                _client.Kill();
             }
         }
 
@@ -206,6 +230,150 @@ namespace InteractiveClient
             var messenger = new Messenger();
             _client.Connect(hostName, port, messenger);
             if (messenger.HasMessage) ShowMessage(messenger);
+        }
+
+        private void StartConsumers(Command command)
+        {
+            int consumerCount;
+            if (command.Arguments.Length < 1 || !int.TryParse(command.Arguments[0], out consumerCount))
+            {
+                Console.WriteLine("INVALID CONSUMER COUNT");
+                return;
+            }
+
+            if (_consumerController == null )
+            {
+                _consumerController = new ConsumerController(_client);
+            }
+
+            _consumerController.StartConsumers(consumerCount);
+        }
+
+        private void StopConsumers(Command command)
+        {
+            int consumerCount;
+            if (command.Arguments.Length < 1 || !int.TryParse(command.Arguments[0], out consumerCount))
+            {
+                Console.WriteLine("INVALID CONSUMER COUNT");
+                return;
+            }
+
+            if (_consumerController == null)
+            {
+                Console.WriteLine("NO CONSUMER CONTROLLER IS RUNNING");
+            }
+
+            _consumerController.StopConsumers(consumerCount);
+        }
+
+        private void StopAllConsumers()
+        {
+            if (_consumerController == null)
+            {
+                Console.WriteLine("NO CONSUMER CONTROLLER IS RUNNING");
+            }
+
+            _consumerController.StopAllConsumers();
+        }
+
+        private void ListWords()
+        {
+            if (_consumerController == null)
+            {
+                Console.WriteLine("NO CONSUMER CONTROLLER IS RUNNING");
+            }
+
+            var orderedWordList = _consumerController.Words.OrderBy(w => w.Index).ToList();
+            List<string> consecutiveWordList = new List<string>();
+            for (int i=0; i< orderedWordList.Count(); i++)
+            {
+                var word = orderedWordList.FirstOrDefault(w => w.Index == i);
+                if (word == null) break;
+                consecutiveWordList.Add(word.Text);
+            }
+            Console.WriteLine(String.Join(" ", consecutiveWordList));
+        }
+
+        private void SaveWords()
+        {
+            if (_consumerController == null)
+            {
+                Console.WriteLine("NO CONSUMER CONTROLLER IS RUNNING");
+            }
+
+            var orderedWordList = _consumerController.Words.OrderBy(w => w.Index).ToList();
+            List<string> consecutiveWordList = new List<string>();
+            for (int i = 0; i < orderedWordList.Count(); i++)
+            {
+                var word = orderedWordList.FirstOrDefault(w => w.Index == i);
+                if (word == null) break;
+                consecutiveWordList.Add(word.Text);
+            }
+
+            var wordText = String.Join(" ", consecutiveWordList);
+
+            System.IO.File.WriteAllText(@"MobyDick.txt", wordText);
+
+            Console.WriteLine($"WORDS SAVED: ");
+        }
+
+        private void ShowConsumerStatus()
+        {
+            if (_consumerController == null)
+            {
+                Console.WriteLine("NO CONSUMER CONTROLLER IS RUNNING");
+            }
+
+            Console.WriteLine();
+            foreach (var client in _consumerController.LinkedClients)
+            {
+                Console.WriteLine($"CONSUMER ENDPOINT: {client.Socket.LocalEndPoint.ToString()}");
+            }
+            Console.WriteLine();
+            Console.WriteLine($"CONSUMER COUNT: {_consumerController.LinkedClients.Count()}");
+            Console.WriteLine();
+            Console.WriteLine($"RECEIVED WORDS: {_consumerController.Words.Count()}");
+        }
+
+        private void RepeatWait(Command command)
+        {
+            if (command.Arguments.Length < 2)
+            {
+                Console.WriteLine("\nREPEAT-WAIT: INVALID NUMBER OF ARGUMENTS\n");
+                return;
+            }
+
+            int waitMilli;
+            if (!int.TryParse(command.Arguments[0], out waitMilli))
+            {
+                Console.WriteLine("\nREPEAT-WAIT: INVALID MILLISECOND WAIT-TIME\n");
+            }
+
+            _repeatWaitStopRequested = 0;
+
+            var thread = new Thread(new ThreadStart(() => WaitForEscape()));
+            thread.Start();
+
+            while (true)
+            {
+                if (Interlocked.Read(ref _repeatWaitStopRequested) == 1)
+                {
+                    break;
+                }
+
+                Console.WriteLine();
+                ProcessCommand(String.Join(" ", command.Arguments.Skip(1)));
+                Thread.Sleep(waitMilli);
+            }
+
+            thread.Join();
+        }
+
+        private void WaitForEscape()
+        {
+            while (Console.ReadKey(true).Key != ConsoleKey.Escape) {}
+
+            Interlocked.Exchange(ref _repeatWaitStopRequested, 1);
         }
     }
 }
