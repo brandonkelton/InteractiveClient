@@ -12,15 +12,26 @@ namespace InteractiveClient
     public class Client
     {
         public Guid LocalId { get; private set; }
-        public bool IsActive { get; private set; }
         public IPEndPoint Endpoint { get; private set; }
         public Socket Socket { get; private set; }
-
-        public long StopRequested = 0;
+        public CancellationToken CancellationToken { get; set; }
+        private long _stopped = 1;
 
         public Client()
         {
             LocalId = Guid.NewGuid();
+        }
+
+        public bool IsActive => Interlocked.Read(ref _stopped) == 0;
+
+        public void Start()
+        {
+            Interlocked.Exchange(ref _stopped, 0);
+        }
+
+        public void Stop()
+        {
+            Interlocked.Exchange(ref _stopped, 1);
         }
 
         public void Connect(string hostNameOrIpAddress, int port, Messenger messenger)
@@ -40,7 +51,7 @@ namespace InteractiveClient
             try
             {
                 Socket.Connect(Endpoint);
-                IsActive = true;
+                Start();
                 messenger.Message.Append($"SUCCESSFULLY CONNECTED TO: {Socket.RemoteEndPoint.ToString()}");
             }
             catch (SocketException se)
@@ -84,13 +95,9 @@ namespace InteractiveClient
                     messenger.Message.Append(se.ToString());
                 }
 
-                IsActive = false;
+                Stop();
             }
-            catch (Exception e)
-            {
-                messenger.Message.Append(e.ToString());
-                messenger.IsError = true;
-            }
+            catch (Exception) { /* swallow */ }
         }
 
         public void Receive(Messenger messenger)
@@ -139,21 +146,16 @@ namespace InteractiveClient
 
         public void Kill()
         {
-            if (IsActive)
+            Stop();
+
+            try
             {
-                try
-                {
-                    var messenger = new Messenger();
-                    Send("disconnect", messenger);
-                    Socket.Close();
-                }
-                catch (Exception e)
-                {
-                    // Swallow error
-                }
+                Socket.Close();
             }
-            
-            IsActive = false;
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+            } // Swallow any errors
         }
     }
 }

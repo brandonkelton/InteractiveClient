@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
@@ -10,13 +11,21 @@ namespace InteractiveClient
 {
     public class ConsumerController
     {
-        public List<Client> LinkedClients = new List<Client>();
+        public static int MaxConsumers = 100;
+        public ConcurrentDictionary<Guid, Client> LinkedClients = new ConcurrentDictionary<Guid, Client>();
         public ConcurrentBag<Word> Words = new ConcurrentBag<Word>();
+        public double CurrentBufferLevel { get; private set; }
+        public int ConsumerCount => LinkedClients.Count();
 
         private Client _client;
         private string _clientId = String.Empty;
-        private Dictionary<Guid, Thread> _threads = new Dictionary<Guid, Thread>();
+        private ConcurrentDictionary<Guid, Thread> _threads = new ConcurrentDictionary<Guid, Thread>();
         private long _stopRequested = 0;
+        private long _consumerWatcherStopRequested = 0;
+        private Thread _consumerWatcherThread = null;
+        private object _lockObj = new object();
+        //private ManualResetEvent _consume = new ManualResetEvent(false);
+        //private ManualResetEvent _stoppingConsumer = new ManualResetEvent(true);
 
         public ConsumerController(Client client)
         {
@@ -24,28 +33,73 @@ namespace InteractiveClient
             _clientId = GetClientId();
         }
 
+        public void StartSelfAdjustingConsumers()
+        {
+            if (_consumerWatcherThread == null)
+            {
+                _consumerWatcherThread = new Thread(new ThreadStart(() => StartConsumers()));
+                _consumerWatcherThread.Start();
+            }
+        }
+
+        // This is the governor of the self-adjusting consumers.
+        // In order to adjust, this runs on it's own thread and monitors
+        // the buffer level as provided by each individual word when that word
+        // was extracted from the buffer on the server-side.
+        private void StartConsumers()
+        {
+            StartConsumers(1);
+
+            while (true)
+            {
+                //if (LinkedClients.All(c => !c.IsActive))
+                //    StopAllConsumers();
+
+                if (Interlocked.Read(ref _consumerWatcherStopRequested) == 1)
+                {
+                    break;
+                }
+
+                if (CurrentBufferLevel >= 90 && ConsumerCount < MaxConsumers)
+                {
+                    StartConsumers(1);
+                }
+                else if (CurrentBufferLevel <= 30 && ConsumerCount > 1)
+                {
+                    StopConsumers(1);
+                }
+
+                Thread.Sleep(500);
+            }
+        }
+
         public void StartConsumers(int count)
         {
+            Interlocked.Exchange(ref _stopRequested, 0);
+
             if (!_client.IsActive || String.IsNullOrEmpty(_clientId))
             {
                 Console.WriteLine("CLIENT IS NOT CONNECTED");
                 return;
             }
 
-            var consumersStarted = 0;
             for (int i=0; i<count; i++)
             {
                 var client = ConnectAndLinkClient();
                 if (client != null)
                 {
-                    consumersStarted++;
                     var thread = new Thread(new ThreadStart(() => ExecuteConsumer(client)));
-                    _threads.Add(client.LocalId, thread);
-                    thread.Start();
+
+                    int attempts = 0;
+                    const int MAX_ATTEMPTS = 100;
+                    bool success = false;
+                    while (attempts++ < MAX_ATTEMPTS && !(success = _threads.TryAdd(client.LocalId, thread)))
+                    {
+                        Thread.Sleep(10);
+                    }
+                    if (success) thread.Start();
                 }
             }
-
-            Console.WriteLine($"{consumersStarted} CONSUMERS STARTED | {LinkedClients.Count} CONSUMERS RUNNING");
         }
 
         private Client ConnectAndLinkClient()
@@ -79,9 +133,15 @@ namespace InteractiveClient
                 return null;
             }
 
-            LinkedClients.Add(client);
+            int attempts = 0;
+            const int MAX_ATTEMPTS = 100;
+            bool success = false;
+            while (attempts++ < MAX_ATTEMPTS && !(success = LinkedClients.TryAdd(client.LocalId, client)))
+            {
+                Thread.Sleep(10);
+            }
 
-            return client;
+            return success ? client : null;
         }
 
         private string GetClientId()
@@ -114,17 +174,15 @@ namespace InteractiveClient
 
         private void ExecuteConsumer(Client client)
         {
-            while (true)
+            while (client.IsActive)
             {
                 if (Interlocked.Read(ref _stopRequested) == 1)
                 {
                     break;
                 }
 
-                if (Interlocked.Read(ref client.StopRequested) == 1)
-                {
-                    break;
-                }
+                //_consume.Reset();
+                //_stoppingConsumer.WaitOne();
 
                 var messenger = new Messenger();
 
@@ -146,12 +204,15 @@ namespace InteractiveClient
                 {
                     break;
                 }
+                
+                lock (_lockObj)
+                {
+                    CurrentBufferLevel = word.BufferLevel;
+                }
+
                 Words.Add(word);
 
-                if (word.BufferLevel >= 8)
-                {
-                    Thread.Sleep(100);
-                }
+                //_consume.Set();
             }
 
             client.Kill();
@@ -162,32 +223,68 @@ namespace InteractiveClient
             var stopConsumerCount = count > LinkedClients.Count ? LinkedClients.Count : count;
             for (int i=0; i<stopConsumerCount; i++)
             {
-                var consumer = LinkedClients[i];
-                Interlocked.Exchange(ref consumer.StopRequested, 1);
+                var consumerKey = LinkedClients.Keys.FirstOrDefault();
 
-                var thread = _threads.GetValueOrDefault(consumer.LocalId);
-                if (thread != null)
+                var attempts = 0;
+                const int MAX_ATTEMPTS = 100;
+                Client removeClient = null;
+                bool success = false;
+                while (attempts++ < MAX_ATTEMPTS && !(success = LinkedClients.TryRemove(consumerKey, out removeClient)))
                 {
-                    thread.Join();
-                    _threads.Remove(consumer.LocalId);
+                    Thread.Sleep(10);
                 }
+                StopConsumer(removeClient);                
             }
+        }
 
-            Console.WriteLine($"{count} CONSUMERS STOPPED | {LinkedClients.Count} CONSUMERS RUNNING");
+        private void StopConsumer(Client consumer)
+        {
+            if (consumer != null)
+            {
+                consumer.Stop();
+
+                //_consume.WaitOne();
+                //_stoppingConsumer.Reset();
+
+                var unlinkMessenger = new Messenger();
+                consumer.Send($"unlinkfrom {_clientId}", unlinkMessenger);
+                consumer.Receive(unlinkMessenger);
+
+                var disconnectMessenger = new Messenger();
+                consumer.Send("disconnect", disconnectMessenger);
+                consumer.Receive(disconnectMessenger);
+
+                //_stoppingConsumer.Set();
+                //_consume.Reset();
+                
+                consumer.Kill();
+
+                int attempts = 0;
+                const int MAX_ATTEMPTS = 100;
+                bool success = false;
+                Thread thread = null;
+                while (attempts++ < MAX_ATTEMPTS && !(success = _threads.TryRemove(consumer.LocalId, out thread)))
+                {
+                    Thread.Sleep(10);
+                }
+
+                if (thread != null) thread.Join();
+            }
         }
 
         public void StopAllConsumers()
         {
+            Interlocked.Exchange(ref _consumerWatcherStopRequested, 1);
             Interlocked.Exchange(ref _stopRequested, 1);
 
-            foreach (var client in LinkedClients)
+            if (_consumerWatcherThread != null)
             {
-                client.Kill();
+                _consumerWatcherThread.Join();
             }
 
-            foreach (var thread in _threads.Values)
+            while (LinkedClients.Count() > 0)
             {
-                thread.Join();
+                StopConsumers(LinkedClients.Count());
             }
         }
     }
