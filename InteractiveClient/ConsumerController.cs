@@ -1,9 +1,10 @@
-﻿using Newtonsoft.Json;
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
 
@@ -199,7 +200,16 @@ namespace InteractiveClient
                     break;
                 }
 
-                var word = JsonConvert.DeserializeObject<Word>(messenger.Message.ToString());
+                Word word;
+                using (var stream = new MemoryStream(Encoding.Unicode.GetBytes(messenger.Message.ToString())))
+                {
+                    var serializer = new DataContractJsonSerializer(typeof(Word));
+
+                    stream.Position = 0;
+                    word = serializer.ReadObject(stream) as Word;
+                    stream.Close();
+                }
+
                 if (word == null || word.Text == "<EOF>")
                 {
                     break;
